@@ -4,13 +4,14 @@
 let ME = null;       // { id, nome, role, medico_id }
 let MEDICOS = [];
 let UNIDADES = [];
+let VALORES = [];    // dl_valores: { medico_id, modalidade, tipo, valor_unitario }
 
 const TIPO_LABEL = { eletivo: "Eletivo", urgencia: "Urgência", internados: "Internados" };
+const MODALIDADE_LABEL = { tomografia: "Tomografia", raio_x: "Raio-X", ressonancia: "Ressonância Magnética", mamografia: "Mamografia" };
 
 function brl(v) { return "R$ " + Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtDate(d) { if (!d) return ""; const [y, m, day] = d.split("-"); return `${day}/${m}/${y}`; }
 function monthRange(monthStr) {
-  // monthStr = "2026-09" -> { start: "2026-09-01", end: "2026-09-30" }
   const [y, m] = monthStr.split("-").map(Number);
   const start = `${y}-${String(m).padStart(2, "0")}-01`;
   const lastDay = new Date(y, m, 0).getDate();
@@ -25,6 +26,27 @@ function monthLabel(monthStr) {
 function waLink(telefone, texto) {
   const num = (telefone || "").replace(/\D/g, "");
   return `https://wa.me/${num}?text=${encodeURIComponent(texto)}`;
+}
+function valorDe(medicoId, modalidade, tipo) {
+  const v = VALORES.find(v => v.medico_id === medicoId && v.modalidade === modalidade && v.tipo === tipo);
+  return v ? Number(v.valor_unitario) : 0;
+}
+function gerarResumoPorCombo(laudos) {
+  const combos = {};
+  laudos.forEach(l => {
+    const key = `${l.modalidade}|${l.tipo}`;
+    if (!combos[key]) combos[key] = { modalidade: l.modalidade, tipo: l.tipo, qtd: 0, valor: 0 };
+    combos[key].qtd += l.quantidade;
+    combos[key].valor += Number(l.valor_total);
+  });
+  return Object.values(combos).sort((a,b) => a.modalidade.localeCompare(b.modalidade) || a.tipo.localeCompare(b.tipo));
+}
+function textoResumo(combos) {
+  if (combos.length === 0) return "Nenhum laudo lançado neste período.";
+  const total = combos.reduce((s,c) => s + c.valor, 0);
+  let texto = combos.map(c => `${MODALIDADE_LABEL[c.modalidade]} (${TIPO_LABEL[c.tipo]}): ${c.qtd} laudo(s) — ${brl(c.valor)}`).join("\n");
+  texto += `\n\n*Total do período: ${brl(total)}*`;
+  return texto;
 }
 
 async function boot() {
@@ -99,12 +121,14 @@ async function loadMedicosEUnidades() {
   MEDICOS = medicos || [];
   const { data: unidades } = await supabaseClient.from("dl_unidades").select("*").eq("ativo", true).order("nome");
   UNIDADES = unidades || [];
+  const { data: valores } = await supabaseClient.from("dl_valores").select("*");
+  VALORES = valores || [];
 
   const fillSelect = (el, list, withEmpty) => {
     el.innerHTML = (withEmpty ? `<option value="">${withEmpty}</option>` : "") +
       list.map(x => `<option value="${x.id}">${x.nome}</option>`).join("");
   };
-  ["laMedico", "fMedico", "relMedico"].forEach(id => { if (document.getElementById(id)) fillSelect(document.getElementById(id), MEDICOS, id === "fMedico" ? "Todos" : null); });
+  ["laMedico", "fMedico", "relMedico", "vMedico"].forEach(id => { if (document.getElementById(id)) fillSelect(document.getElementById(id), MEDICOS, id === "fMedico" ? "Todos" : null); });
   ["laUnidade", "fUnidade", "rUnidade", "relUnidade", "lmUnidade"].forEach(id => { if (document.getElementById(id)) fillSelect(document.getElementById(id), UNIDADES, id === "fUnidade" ? "Todas" : null); });
 }
 
@@ -125,7 +149,7 @@ async function renderPainel() {
 
   const { data: ultimos } = await supabaseClient.from("dl_laudos").select("*, dl_medicos(nome), dl_unidades(nome)").order("created_at", { ascending: false }).limit(10);
   const tbody = document.querySelector("#tblUltimosLaudos tbody");
-  tbody.innerHTML = (ultimos || []).map(l => `<tr><td>${fmtDate(l.data)}</td><td>${l.dl_medicos?.nome || ""}</td><td>${l.dl_unidades?.nome || ""}</td><td>${TIPO_LABEL[l.tipo]}</td><td>${l.quantidade}</td><td>${brl(l.valor_total)}</td></tr>`).join("") || `<tr><td colspan="6" class="hint">Nenhum laudo lançado ainda.</td></tr>`;
+  tbody.innerHTML = (ultimos || []).map(l => `<tr><td>${fmtDate(l.data)}</td><td>${l.dl_medicos?.nome || ""}</td><td>${l.dl_unidades?.nome || ""}</td><td>${MODALIDADE_LABEL[l.modalidade]||""}</td><td>${TIPO_LABEL[l.tipo]}</td><td>${l.quantidade}</td><td>${brl(l.valor_total)}</td></tr>`).join("") || `<tr><td colspan="7" class="hint">Nenhum laudo lançado ainda.</td></tr>`;
 }
 
 async function renderCadastros() {
@@ -148,7 +172,23 @@ async function renderCadastros() {
 
   const { data: medicos } = await supabaseClient.from("dl_medicos").select("*").order("nome");
   document.querySelector("#tblMedicos tbody").innerHTML = (medicos || []).map(m =>
-    `<tr><td>${m.nome}</td><td>${m.telefone || ""}</td><td>${brl(m.valor_eletivo)}</td><td>${brl(m.valor_urgencia)}</td><td>${brl(m.valor_internados)}</td></tr>`).join("");
+    `<tr><td>${m.nome}</td><td>${m.telefone || ""}</td></tr>`).join("");
+
+  renderValoresPorMedico();
+}
+
+function renderValoresPorMedico() {
+  const el = document.getElementById("valoresPorMedico");
+  if (MEDICOS.length === 0) { el.innerHTML = "<p class='hint'>Cadastre um médico primeiro.</p>"; return; }
+  el.innerHTML = MEDICOS.map(m => {
+    const valoresM = VALORES.filter(v => v.medico_id === m.id);
+    return `<div class="list-item" style="display:block; margin-bottom:10px;">
+      <strong>${m.nome}</strong>
+      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;">
+        ${valoresM.map(v => `<span class="badge pago">${MODALIDADE_LABEL[v.modalidade]} · ${TIPO_LABEL[v.tipo]}: ${brl(v.valor_unitario)}</span>`).join("") || "<span class='hint'>nenhum valor cadastrado ainda</span>"}
+      </div>
+    </div>`;
+  }).join("");
 }
 
 window.vincularMedico = async (profileId) => {
@@ -176,13 +216,24 @@ document.getElementById("formMedico").addEventListener("submit", async (e) => {
   await supabaseClient.from("dl_medicos").insert({
     nome: document.getElementById("mNome").value.trim(),
     telefone: document.getElementById("mTelefone").value.trim(),
-    valor_eletivo: Number(document.getElementById("mEletivo").value),
-    valor_urgencia: Number(document.getElementById("mUrgencia").value),
-    valor_internados: Number(document.getElementById("mInternados").value),
   });
   e.target.reset();
   await loadMedicosEUnidades();
   await renderCadastros();
+});
+
+document.getElementById("formValor").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const { error } = await supabaseClient.from("dl_valores").upsert({
+    medico_id: document.getElementById("vMedico").value,
+    modalidade: document.getElementById("vModalidade").value,
+    tipo: document.getElementById("vTipo").value,
+    valor_unitario: Number(document.getElementById("vValor").value),
+  }, { onConflict: "medico_id,modalidade,tipo" });
+  if (error) { alert("Erro ao salvar valor: " + error.message); return; }
+  document.getElementById("vValor").value = "";
+  await loadMedicosEUnidades();
+  renderValoresPorMedico();
 });
 
 async function renderLaudosAdmin(filtro) {
@@ -192,23 +243,24 @@ async function renderLaudosAdmin(filtro) {
   if (filtro?.start) q = q.gte("data", filtro.start).lte("data", filtro.end);
   const { data } = await q.limit(300);
   document.querySelector("#tblLaudos tbody").innerHTML = (data || []).map(l =>
-    `<tr><td>${fmtDate(l.data)}</td><td>${l.dl_medicos?.nome || ""}</td><td>${l.dl_unidades?.nome || ""}</td><td>${TIPO_LABEL[l.tipo]}</td><td>${l.quantidade}</td><td>${brl(l.valor_unitario)}</td><td>${brl(l.valor_total)}</td></tr>`
-  ).join("") || `<tr><td colspan="7" class="hint">Nenhum laudo encontrado.</td></tr>`;
+    `<tr><td>${fmtDate(l.data)}</td><td>${l.dl_medicos?.nome || ""}</td><td>${l.dl_unidades?.nome || ""}</td><td>${MODALIDADE_LABEL[l.modalidade]||""}</td><td>${TIPO_LABEL[l.tipo]}</td><td>${l.quantidade}</td><td>${brl(l.valor_unitario)}</td><td>${brl(l.valor_total)}</td></tr>`
+  ).join("") || `<tr><td colspan="8" class="hint">Nenhum laudo encontrado.</td></tr>`;
 }
 
 document.getElementById("formLaudoAdmin").addEventListener("submit", async (e) => {
   e.preventDefault();
   const msg = document.getElementById("msgLaudoAdmin");
   const medicoId = document.getElementById("laMedico").value;
+  const modalidade = document.getElementById("laModalidade").value;
   const tipo = document.getElementById("laTipo").value;
   const qtd = Number(document.getElementById("laQtd").value);
-  const medico = MEDICOS.find(m => m.id === medicoId);
-  const valorUnit = tipo === "eletivo" ? medico.valor_eletivo : tipo === "urgencia" ? medico.valor_urgencia : medico.valor_internados;
+  const valorUnit = valorDe(medicoId, modalidade, tipo);
+  if (valorUnit === 0 && !confirm(`Não há valor cadastrado para ${MODALIDADE_LABEL[modalidade]} (${TIPO_LABEL[tipo]}) desse médico. Lançar mesmo assim com valor R$ 0,00?`)) return;
   const { error } = await supabaseClient.from("dl_laudos").insert({
     data: document.getElementById("laData").value,
     medico_id: medicoId,
     unidade_id: document.getElementById("laUnidade").value,
-    tipo, quantidade: qtd, valor_unitario: valorUnit, valor_total: valorUnit * qtd,
+    modalidade, tipo, quantidade: qtd, valor_unitario: valorUnit, valor_total: valorUnit * qtd,
   });
   msg.textContent = error ? "Erro: " + error.message : "Laudo lançado!";
   msg.className = "msg " + (error ? "err" : "ok");
@@ -264,15 +316,8 @@ function setupRelatorios() {
     const unidade = UNIDADES.find(u => u.id === unidadeId);
     const { start, end } = monthRange(mes);
     const { data } = await supabaseClient.from("dl_laudos").select("*").eq("unidade_id", unidadeId).gte("data", start).lte("data", end);
-    const porTipo = { eletivo: 0, urgencia: 0, internados: 0 };
-    const valorTipo = { eletivo: 0, urgencia: 0, internados: 0 };
-    (data || []).forEach(l => { porTipo[l.tipo] += l.quantidade; valorTipo[l.tipo] += Number(l.valor_total); });
-    const total = valorTipo.eletivo + valorTipo.urgencia + valorTipo.internados;
-    const texto = `*DiagLaudos — Relatório de Laudos*\n${unidade.nome} — ${monthLabel(mes)}\n\n` +
-      `Eletivos: ${porTipo.eletivo} laudo(s) — ${brl(valorTipo.eletivo)}\n` +
-      `Urgência: ${porTipo.urgencia} laudo(s) — ${brl(valorTipo.urgencia)}\n` +
-      `Internados: ${porTipo.internados} laudo(s) — ${brl(valorTipo.internados)}\n\n` +
-      `*Total do período: ${brl(total)}*`;
+    const combos = gerarResumoPorCombo(data || []);
+    const texto = `*DiagLaudos — Relatório de Laudos*\n${unidade.nome} — ${monthLabel(mes)}\n\n${textoResumo(combos)}`;
     document.getElementById("boxRelUnidade").innerHTML = `<div class="report-box">${texto}</div>` +
       (unidade.telefone ? `<a class="btn-primary btn-sm" style="display:inline-block; margin-top:10px; text-decoration:none;" target="_blank" href="${waLink(unidade.telefone, texto)}">Enviar no WhatsApp</a>` : `<p class="hint">Cadastre o WhatsApp da unidade para enviar direto.</p>`);
   });
@@ -284,15 +329,8 @@ function setupRelatorios() {
     const medico = MEDICOS.find(m => m.id === medicoId);
     const { start, end } = monthRange(mes);
     const { data } = await supabaseClient.from("dl_laudos").select("*").eq("medico_id", medicoId).gte("data", start).lte("data", end);
-    const porTipo = { eletivo: 0, urgencia: 0, internados: 0 };
-    const valorTipo = { eletivo: 0, urgencia: 0, internados: 0 };
-    (data || []).forEach(l => { porTipo[l.tipo] += l.quantidade; valorTipo[l.tipo] += Number(l.valor_total); });
-    const total = valorTipo.eletivo + valorTipo.urgencia + valorTipo.internados;
-    const texto = `*DiagLaudos — Relatório de Produção*\n${medico.nome} — ${monthLabel(mes)}\n\n` +
-      `Eletivos: ${porTipo.eletivo} laudo(s) — ${brl(valorTipo.eletivo)}\n` +
-      `Urgência: ${porTipo.urgencia} laudo(s) — ${brl(valorTipo.urgencia)}\n` +
-      `Internados: ${porTipo.internados} laudo(s) — ${brl(valorTipo.internados)}\n\n` +
-      `*Total a receber: ${brl(total)}*`;
+    const combos = gerarResumoPorCombo(data || []);
+    const texto = `*DiagLaudos — Relatório de Produção*\n${medico.nome} — ${monthLabel(mes)}\n\n${textoResumo(combos)}`;
     document.getElementById("boxRelMedico").innerHTML = `<div class="report-box">${texto}</div>` +
       (medico.telefone ? `<a class="btn-primary btn-sm" style="display:inline-block; margin-top:10px; text-decoration:none;" target="_blank" href="${waLink(medico.telefone, texto)}">Enviar no WhatsApp</a>` : `<p class="hint">Cadastre o WhatsApp do médico para enviar direto.</p>`);
   });
@@ -314,20 +352,23 @@ async function bootMedico() {
   document.getElementById("lmUnidade").innerHTML = UNIDADES.map(u => `<option value="${u.id}">${u.nome}</option>`).join("");
   document.getElementById("lmData").value = new Date().toISOString().slice(0, 10);
 
+  const { data: valores } = await supabaseClient.from("dl_valores").select("*").eq("medico_id", ME.medico_id);
+  VALORES = valores || [];
+
   await renderMeusLaudos();
 
   document.getElementById("formLaudoMedico").addEventListener("submit", async (e) => {
     e.preventDefault();
     const msg = document.getElementById("msgLaudoMedico");
-    const { data: medico } = await supabaseClient.from("dl_medicos").select("*").eq("id", ME.medico_id).single();
+    const modalidade = document.getElementById("lmModalidade").value;
     const tipo = document.getElementById("lmTipo").value;
     const qtd = Number(document.getElementById("lmQtd").value);
-    const valorUnit = tipo === "eletivo" ? medico.valor_eletivo : tipo === "urgencia" ? medico.valor_urgencia : medico.valor_internados;
+    const valorUnit = valorDe(ME.medico_id, modalidade, tipo);
     const { error } = await supabaseClient.from("dl_laudos").insert({
       data: document.getElementById("lmData").value,
       medico_id: ME.medico_id,
       unidade_id: document.getElementById("lmUnidade").value,
-      tipo, quantidade: qtd, valor_unitario: valorUnit, valor_total: valorUnit * qtd,
+      modalidade, tipo, quantidade: qtd, valor_unitario: valorUnit, valor_total: valorUnit * qtd,
       criado_por: (await supabaseClient.auth.getSession()).data.session.user.id,
     });
     msg.textContent = error ? "Erro: " + error.message : "Laudo lançado com sucesso!";
@@ -340,17 +381,10 @@ async function bootMedico() {
     const mes = document.getElementById("meuRelMes").value;
     const { start, end } = monthRange(mes);
     const { data } = await supabaseClient.from("dl_laudos").select("*").eq("medico_id", ME.medico_id).gte("data", start).lte("data", end);
-    const porTipo = { eletivo: 0, urgencia: 0, internados: 0 };
-    const valorTipo = { eletivo: 0, urgencia: 0, internados: 0 };
-    (data || []).forEach(l => { porTipo[l.tipo] += l.quantidade; valorTipo[l.tipo] += Number(l.valor_total); });
-    const total = valorTipo.eletivo + valorTipo.urgencia + valorTipo.internados;
+    const combos = gerarResumoPorCombo(data || []);
     const { data: pagStatus } = await supabaseClient.from("dl_pagamentos_status").select("*").eq("medico_id", ME.medico_id).eq("competencia", start).maybeSingle();
     document.getElementById("boxMeuRelatorio").innerHTML = `
-      <div class="report-box">*Relatório de Produção — ${monthLabel(mes)}*\n\n` +
-      `Eletivos: ${porTipo.eletivo} laudo(s) — ${brl(valorTipo.eletivo)}\n` +
-      `Urgência: ${porTipo.urgencia} laudo(s) — ${brl(valorTipo.urgencia)}\n` +
-      `Internados: ${porTipo.internados} laudo(s) — ${brl(valorTipo.internados)}\n\n` +
-      `Total a receber: ${brl(total)}\n` +
+      <div class="report-box">*Relatório de Produção — ${monthLabel(mes)}*\n\n${textoResumo(combos)}\n\n` +
       `Status: <span class="badge ${pagStatus?.status || 'pendente'}">${pagStatus?.status || 'pendente'}</span></div>`;
   });
 }
@@ -358,8 +392,8 @@ async function bootMedico() {
 async function renderMeusLaudos() {
   const { data } = await supabaseClient.from("dl_laudos").select("*, dl_unidades(nome)").eq("medico_id", ME.medico_id).order("data", { ascending: false }).limit(100);
   document.querySelector("#tblMeusLaudos tbody").innerHTML = (data || []).map(l =>
-    `<tr><td>${fmtDate(l.data)}</td><td>${l.dl_unidades?.nome || ""}</td><td>${TIPO_LABEL[l.tipo]}</td><td>${l.quantidade}</td><td>${brl(l.valor_total)}</td></tr>`
-  ).join("") || `<tr><td colspan="5" class="hint">Nenhum laudo lançado ainda.</td></tr>`;
+    `<tr><td>${fmtDate(l.data)}</td><td>${l.dl_unidades?.nome || ""}</td><td>${MODALIDADE_LABEL[l.modalidade]||""}</td><td>${TIPO_LABEL[l.tipo]}</td><td>${l.quantidade}</td><td>${brl(l.valor_total)}</td></tr>`
+  ).join("") || `<tr><td colspan="6" class="hint">Nenhum laudo lançado ainda.</td></tr>`;
 }
 
 boot();
