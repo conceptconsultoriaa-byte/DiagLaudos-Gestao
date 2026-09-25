@@ -167,15 +167,69 @@ async function renderCadastros() {
   }
 
   const { data: unidades } = await supabaseClient.from("dl_unidades").select("*").order("nome");
-  document.querySelector("#tblUnidades tbody").innerHTML = (unidades || []).map(u =>
-    `<tr><td>${u.nome}</td><td>${u.telefone || ""}</td><td>${u.email || ""}</td></tr>`).join("");
+  UNIDADES_CADASTRO = unidades || [];
+  document.querySelector("#tblUnidades tbody").innerHTML = UNIDADES_CADASTRO.map(u =>
+    `<tr><td>${u.nome}</td><td>${u.telefone || ""}</td><td>${u.email || ""}</td><td><button class="btn-outline btn-sm" onclick="editarUnidade('${u.id}')">Editar</button></td></tr>`).join("");
 
   const { data: medicos } = await supabaseClient.from("dl_medicos").select("*").order("nome");
-  document.querySelector("#tblMedicos tbody").innerHTML = (medicos || []).map(m =>
-    `<tr><td>${m.nome}</td><td>${m.telefone || ""}</td></tr>`).join("");
+  MEDICOS_CADASTRO = medicos || [];
+  document.querySelector("#tblMedicos tbody").innerHTML = MEDICOS_CADASTRO.map(m =>
+    `<tr><td>${m.nome}</td><td>${m.telefone || ""}</td><td><button class="btn-outline btn-sm" onclick="editarMedico('${m.id}')">Editar</button></td></tr>`).join("");
 
   renderValoresPorMedico();
 }
+
+let UNIDADES_CADASTRO = [];
+let MEDICOS_CADASTRO = [];
+let editingUnidadeId = null;
+let editingMedicoId = null;
+
+window.editarUnidade = (id) => {
+  const u = UNIDADES_CADASTRO.find(x => x.id === id);
+  if (!u) return;
+  editingUnidadeId = id;
+  document.getElementById("uNome").value = u.nome || "";
+  document.getElementById("uTelefone").value = u.telefone || "";
+  document.getElementById("uEmail").value = u.email || "";
+  const titulo = document.getElementById("formUnidadeTitle");
+  titulo.textContent = "Editando: " + u.nome;
+  titulo.style.display = "block";
+  document.getElementById("formUnidadeSubmitBtn").textContent = "Salvar alterações";
+  document.getElementById("formUnidadeCancelBtn").style.display = "inline-block";
+  document.getElementById("formUnidade").scrollIntoView({ behavior: "smooth", block: "start" });
+  document.getElementById("uNome").focus();
+};
+function cancelarEdicaoUnidade(){
+  editingUnidadeId = null;
+  document.getElementById("formUnidade").reset();
+  document.getElementById("formUnidadeTitle").style.display = "none";
+  document.getElementById("formUnidadeSubmitBtn").textContent = "Adicionar";
+  document.getElementById("formUnidadeCancelBtn").style.display = "none";
+}
+document.getElementById("formUnidadeCancelBtn").addEventListener("click", cancelarEdicaoUnidade);
+
+window.editarMedico = (id) => {
+  const m = MEDICOS_CADASTRO.find(x => x.id === id);
+  if (!m) return;
+  editingMedicoId = id;
+  document.getElementById("mNome").value = m.nome || "";
+  document.getElementById("mTelefone").value = m.telefone || "";
+  const titulo = document.getElementById("formMedicoTitle");
+  titulo.textContent = "Editando: " + m.nome;
+  titulo.style.display = "block";
+  document.getElementById("formMedicoSubmitBtn").textContent = "Salvar alterações";
+  document.getElementById("formMedicoCancelBtn").style.display = "inline-block";
+  document.getElementById("formMedico").scrollIntoView({ behavior: "smooth", block: "start" });
+  document.getElementById("mNome").focus();
+};
+function cancelarEdicaoMedico(){
+  editingMedicoId = null;
+  document.getElementById("formMedico").reset();
+  document.getElementById("formMedicoTitle").style.display = "none";
+  document.getElementById("formMedicoSubmitBtn").textContent = "Adicionar";
+  document.getElementById("formMedicoCancelBtn").style.display = "none";
+}
+document.getElementById("formMedicoCancelBtn").addEventListener("click", cancelarEdicaoMedico);
 
 function renderValoresPorMedico() {
   const el = document.getElementById("valoresPorMedico");
@@ -201,23 +255,35 @@ window.vincularMedico = async (profileId) => {
 
 document.getElementById("formUnidade").addEventListener("submit", async (e) => {
   e.preventDefault();
-  await supabaseClient.from("dl_unidades").insert({
+  const payload = {
     nome: document.getElementById("uNome").value.trim(),
     telefone: document.getElementById("uTelefone").value.trim(),
     email: document.getElementById("uEmail").value.trim(),
-  });
-  e.target.reset();
+  };
+  if (editingUnidadeId) {
+    await supabaseClient.from("dl_unidades").update(payload).eq("id", editingUnidadeId);
+    cancelarEdicaoUnidade();
+  } else {
+    await supabaseClient.from("dl_unidades").insert(payload);
+    e.target.reset();
+  }
   await loadMedicosEUnidades();
   await renderCadastros();
 });
 
 document.getElementById("formMedico").addEventListener("submit", async (e) => {
   e.preventDefault();
-  await supabaseClient.from("dl_medicos").insert({
+  const payload = {
     nome: document.getElementById("mNome").value.trim(),
     telefone: document.getElementById("mTelefone").value.trim(),
-  });
-  e.target.reset();
+  };
+  if (editingMedicoId) {
+    await supabaseClient.from("dl_medicos").update(payload).eq("id", editingMedicoId);
+    cancelarEdicaoMedico();
+  } else {
+    await supabaseClient.from("dl_medicos").insert(payload);
+    e.target.reset();
+  }
   await loadMedicosEUnidades();
   await renderCadastros();
 });
